@@ -3,35 +3,34 @@ import pandas as pd
 import yfinance as yf
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.dates as mdates  # <--- 修正1：補上這行，解決 'mdates' not defined 錯誤
+import matplotlib.dates as mdates
 import matplotlib.font_manager as fm
 import os
+import urllib.request
 from datetime import datetime, timedelta
 
 # ==========================================
-# 0. Streamlit 設定與字型處理
+# 0. Streamlit 設定與字型處理 (修復版)
 # ==========================================
 st.set_page_config(page_title="威科夫波段-EvR分析", layout="wide")
 
-# 自動下載並設定中文字型 (修正版：加入 User-Agent 防止被擋)
 @st.cache_resource
 def get_chinese_font():
-    # 使用 Google Noto Sans TC
-    font_url = "https://github.com/googlefonts/noto-cjk/raw/main/Sans/OTF/TraditionalChinese/NotoSansTC-Regular.otf"
-    font_path = "NotoSansTC-Regular.otf"
+    # 改用 "粉圓體 (Open Huninn)"，連結穩定且支援繁體中文
+    font_url = "https://github.com/justfont/open-huninn-font/releases/download/v2.0/jf-openhuninn-2.0.ttf"
+    font_path = "jf-openhuninn-2.0.ttf"
     
     if not os.path.exists(font_path):
-        import urllib.request
-        # 修正2：加入 User-Agent Header，偽裝成瀏覽器下載，避免被 GitHub 阻擋
+        # 偽裝 User-Agent 防止 403 Forbidden
         opener = urllib.request.build_opener()
         opener.addheaders = [('User-agent', 'Mozilla/5.0')]
         urllib.request.install_opener(opener)
         
-        with st.spinner("正在下載中文字型檔 (約 16MB)，請稍候..."):
+        with st.spinner("正在下載中文字型 (粉圓體)..."):
             try:
                 urllib.request.urlretrieve(font_url, font_path)
             except Exception as e:
-                st.error(f"字型下載失敗：{e}，圖表中文將無法顯示。")
+                st.error(f"字型下載失敗：{e}")
                 return None
                 
     return fm.FontProperties(fname=font_path)
@@ -51,7 +50,8 @@ SYMBOL_MAP = {
 # ==========================================
 
 def calculate_indicators(df):
-    df['SMA200'] = df['Close'].rolling(window=200).mean()
+    df['SMA200'] = df['Close'].rolling(window=200).mean() # 年線
+    df['SMA60'] = df['Close'].rolling(window=60).mean()   # 季線
     df['Vol_MA20'] = df['Volume'].rolling(window=20).mean()
     
     # EvR 能量指標
@@ -61,6 +61,40 @@ def calculate_indicators(df):
     evr_std = evr_ema.rolling(100).std().replace(0, np.nan).ffill()
     df['EvR'] = (evr_ema / evr_std) * 10
     return df
+
+# 新增：大盤環境判斷
+def get_market_sentiment():
+    try:
+        end = datetime.now()
+        start = end - timedelta(days=400)
+        # 下載大盤 (台股代號 ^TWII)
+        df = yf.download("^TWII", start=start, end=end, interval="1d", progress=False)
+        
+        if isinstance(df.columns, pd.MultiIndex): 
+            df.columns = [c[0] for c in df.columns]
+        
+        if len(df) < 200: return None
+        
+        df = calculate_indicators(df)
+        last = df.iloc[-1]
+        
+        # 判斷邏輯
+        close = last['Close'] if np.isscalar(last['Close']) else last['Close'].iloc[0]
+        sma200 = last['SMA200'] if np.isscalar(last['SMA200']) else last['SMA200'].iloc[0]
+        evr = last['EvR'] if np.isscalar(last['EvR']) else last['EvR'].iloc[0]
+        
+        trend = "多頭 (Bull)" if close > sma200 else "空頭 (Bear)"
+        trend_color = "red" if close > sma200 else "green" # 台股紅漲綠跌
+        
+        return {
+            "price": close,
+            "sma200": sma200,
+            "evr": evr,
+            "trend": trend,
+            "color": trend_color
+        }
+    except:
+        return None
 
 def analyze_classic_wyckoff(df):
     signals = []
@@ -73,7 +107,6 @@ def analyze_classic_wyckoff(df):
     for i in range(100, len(df)):
         row = df.iloc[i]; date = df.index[i]
         
-        # 處理 Series 與 Scalar 差異
         close_p = row['Close'] if np.isscalar(row['Close']) else row['Close'].iloc[0]
         low_p = row['Low'] if np.isscalar(row['Low']) else row['Low'].iloc[0]
         high_p = row['High'] if np.isscalar(row['High']) else row['High'].iloc[0]
@@ -83,7 +116,7 @@ def analyze_classic_wyckoff(df):
         
         vol_cond = vol > (vol_ma * 1.5)
         
-        # 1. 更新結構
+        # 更新結構
         lowest_20 = df['Low'].iloc[i-20:i].min()
         if low_p < lowest_20 and vol_cond and close_p > low_p:
             struct_low = low_p; sc_date = date
@@ -97,7 +130,7 @@ def analyze_classic_wyckoff(df):
         df.at[date, 'Wyckoff_Support'] = struct_low
         df.at[date, 'Wyckoff_Resistance'] = struct_high
         
-        # 2. 進出場邏輯
+        # 進出場
         if position == 'None':
             if np.isnan(struct_low): continue
             is_after_sc = (sc_date is not None and date > sc_date)
@@ -140,7 +173,6 @@ def analyze_evr_trend(df, window=60):
         sma200 = row['SMA200'] if np.isscalar(row['SMA200']) else row['SMA200'].iloc[0]
         prev_evr = df.iloc[i-1]['EvR'] if np.isscalar(df.iloc[i-1]['EvR']) else df.iloc[i-1]['EvR'].iloc[0]
         
-        # 背離偵測
         local_low = df['Low'].iloc[i-window:i+1].min()
         if low_p == local_low:
             is_buy_div = (local_low < last_low_p and evr > last_low_e)
@@ -173,7 +205,7 @@ def analyze_evr_trend(df, window=60):
     return pd.DataFrame(signals)
 
 # ==========================================
-# 2. 繪圖模組 (修改為回傳 fig)
+# 2. 繪圖模組
 # ==========================================
 
 def plot_chart(df, ticker, signals, mode_name, show_raw=False):
@@ -182,7 +214,6 @@ def plot_chart(df, ticker, signals, mode_name, show_raw=False):
     
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 8), sharex=True, gridspec_kw={'height_ratios': [3, 1]})
     
-    # K線繪製
     width = 0.6
     up = subset[subset.Close >= subset.Open]
     down = subset[subset.Close < subset.Open]
@@ -194,7 +225,6 @@ def plot_chart(df, ticker, signals, mode_name, show_raw=False):
     ax1.bar(down.index, down.Low - down.Close, 0.1, bottom=down.Close, color='#26a69a')
 
     if not show_raw:
-        # 策略繪圖
         if 'Classic Wyckoff' in mode_name:
             if 'Wyckoff_Support' in subset.columns:
                 ax1.plot(subset.index, subset['Wyckoff_Support'], color='purple', linewidth=1.5, label='支撐線 (SC)')
@@ -202,13 +232,12 @@ def plot_chart(df, ticker, signals, mode_name, show_raw=False):
                 ax1.plot(subset.index, subset['Wyckoff_Resistance'], color='orange', linewidth=1.5, linestyle='--', label='壓力線 (BC)')
             ax2.bar(subset.index, subset['Volume'], color='gray', alpha=0.5)
             ax2.set_ylabel('成交量', fontproperties=my_font)
-        else: # EvR
+        else: 
             ax1.plot(subset.index, subset['SMA200'], color='blue', linestyle='--', label='SMA200')
             ax2.plot(subset.index, subset['EvR'], color='#7e57c2', label='EvR')
             ax2.axhline(0, color='black')
             ax2.set_ylabel('EvR 能量', fontproperties=my_font)
 
-        # 訊號標示
         if not signals.empty:
             mask = (signals['Date'] >= subset.index[0]) & (signals['Date'] <= subset.index[-1])
             valid_signals = signals[mask]
@@ -224,24 +253,18 @@ def plot_chart(df, ticker, signals, mode_name, show_raw=False):
                     ax1.scatter(d, p, marker='x', color='black', s=80, zorder=15)
     
     else:
-        # 顯示原始圖時的 Volume
         ax1.plot(subset.index, subset['SMA200'], color='blue', linestyle='--', label='SMA200')
         ax2.bar(subset.index, subset['Volume'], color='gray')
 
     title = f"[{ticker}] {mode_name}" if not show_raw else f"[{ticker}] 原始走勢圖"
     ax1.set_title(title, fontsize=16, fontproperties=my_font)
     ax1.legend(loc='upper left', prop=my_font)
-    
-    # 日期格式化
     ax1.xaxis_date()
-    ax1.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d')) # 現在這行可以正常運作了
+    ax1.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
     plt.xticks(rotation=45)
     plt.tight_layout()
     return fig
 
-# ==========================================
-# 3. 建議生成模組
-# ==========================================
 def get_todays_action(df, signals):
     last_date = df.index[-1]
     today_signal = None
@@ -252,44 +275,53 @@ def get_todays_action(df, signals):
 
     action = "【無動作 (WAIT)】"
     reason = "目前無明確訊號，持有者續抱，空手者觀望。"
-    color = "gray"
     
     if today_signal is not None:
         t = today_signal['Type']; note = today_signal['Note']
         stop = today_signal.get('Stop', 0)
         
         if t in ['Spring', 'Test', 'Long']:
-            action = "🟣【買進/做多 (BUY)】"; color = "green"
+            action = "🟣【買進/做多 (BUY)】"
             reason = f"觸發 {note}，建議停損設 {stop:.2f}"
         elif t in ['Short']:
-            action = "🔵【放空 (SHORT)】"; color = "red"
+            action = "🔵【放空 (SHORT)】"
             reason = f"觸發 {note}，建議停損設 {stop:.2f}"
         elif 'Exit_TP' in t:
-            action = "🌟【停利出場 (Take Profit)】"; color = "gold"
+            action = "🌟【停利出場 (Take Profit)】"
             reason = f"觸發 {note}，獲利了結。"
         elif 'Exit' in t:
-            action = "❌【出場 (Exit)】"; color = "black"
+            action = "❌【出場 (Exit)】"
             reason = f"觸發 {note}。"
             
-    return action, reason, color
+    return action, reason
 
 # ==========================================
 # 4. Streamlit 主程式介面
 # ==========================================
 
-# 側邊欄設定
-st.sidebar.title("📊 威科夫與 EvR 互動分析")
+# 側邊欄：大盤儀表板
+st.sidebar.title("📊 威科夫 x EvR 戰情室")
+
+with st.sidebar.expander("🌍 大盤環境 (^TWII)", expanded=True):
+    with st.spinner("載入大盤數據..."):
+        mkt = get_market_sentiment()
+        if mkt:
+            st.metric("加權指數", f"{mkt['price']:.0f}", delta=f"距離年線 {(mkt['price'] - mkt['sma200']):.0f}")
+            if mkt['trend'] == "多頭 (Bull)":
+                st.success(f"目前趨勢：{mkt['trend']}")
+            else:
+                st.error(f"目前趨勢：{mkt['trend']}")
+            st.write(f"EvR 能量: {mkt['evr']:.2f}")
+        else:
+            st.warning("大盤數據讀取失敗")
+
 st.sidebar.markdown("---")
 
-# 代碼選擇器
 category = st.sidebar.selectbox("選擇分類", list(SYMBOL_MAP.keys()))
 symbol_name_map = SYMBOL_MAP[category]
 selected_name = st.sidebar.selectbox("選擇標的", list(symbol_name_map.values()))
-
-# 反查代碼
 target_symbol = [k for k, v in symbol_name_map.items() if v == selected_name][0]
 
-# 允許手動輸入
 manual_symbol = st.sidebar.text_input("或手動輸入代號 (如 2330.TW)", value="")
 if manual_symbol:
     target_symbol = manual_symbol.upper()
@@ -303,19 +335,16 @@ if strategy.startswith("B"):
 
 run_btn = st.sidebar.button("🚀 開始分析", type="primary")
 
-# 主畫面
 if run_btn:
     st.title(f"📈 {selected_name} ({target_symbol}) 分析報告")
     
-    with st.spinner(f"正在下載 {target_symbol} 數據並運算中..."):
+    with st.spinner(f"正在分析 {target_symbol}..."):
         try:
             end_date = datetime.now()
-            start_date = end_date - timedelta(days=600) # 抓長一點確保 sma200 穩定
+            start_date = end_date - timedelta(days=600) 
             
-            # 下載數據
             df = yf.download(target_symbol, start=start_date, end=end_date, interval="1d", progress=False)
             
-            # 清理資料結構
             if isinstance(df.columns, pd.MultiIndex): 
                 df.columns = [c[0] for c in df.columns]
             df = df.loc[:, ~df.columns.duplicated()]
@@ -323,10 +352,8 @@ if run_btn:
             if len(df) < 150:
                 st.error("❌ 數據不足，無法計算指標 (K棒少於 150 根)")
             else:
-                # 計算
                 df = calculate_indicators(df)
                 
-                # 執行策略
                 if strategy.startswith("A"):
                     mode = "Classic Wyckoff"
                     signals, df = analyze_classic_wyckoff(df)
@@ -334,8 +361,7 @@ if run_btn:
                     mode = f"EvR Trend ({evr_window}日)"
                     signals = analyze_evr_trend(df, window=evr_window)
                 
-                # 顯示最新建議
-                act, rea, color = get_todays_action(df, signals)
+                act, rea = get_todays_action(df, signals)
                 
                 st.markdown(f"### 📅 分析日期: {df.index[-1].strftime('%Y-%m-%d')}")
                 
@@ -345,12 +371,10 @@ if run_btn:
                 with col2:
                     st.write(f"**原因**: {rea}")
 
-                # 繪圖
                 st.subheader(f"{mode} 訊號圖")
                 fig = plot_chart(df, target_symbol, signals, mode)
                 st.pyplot(fig)
                 
-                # 顯示近期訊號表
                 if not signals.empty:
                     st.subheader("📋 近期訊號列表")
                     last_5_sig = signals.tail(5).copy()
@@ -360,11 +384,7 @@ if run_btn:
 
         except Exception as e:
             st.error(f"發生錯誤: {e}")
+            import traceback
+            st.text(traceback.format_exc())
 else:
     st.info("👈 請在左側選擇標的並點擊「開始分析」")
-    st.markdown("### 使用說明")
-    st.markdown("""
-    1. **威科夫波段**: 適合抓取箱型震盪的底部 (Spring) 與頂部 (BC)。
-    2. **EvR 順勢**: 適合跟隨長趨勢，利用能量背離來做停利保護。
-    3. **支援標的**: 台股、美股、加密貨幣皆可輸入。
-    """)
