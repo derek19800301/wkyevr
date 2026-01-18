@@ -3,6 +3,7 @@ import pandas as pd
 import yfinance as yf
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates  # <--- 修正1：補上這行，解決 'mdates' not defined 錯誤
 import matplotlib.font_manager as fm
 import os
 from datetime import datetime, timedelta
@@ -12,19 +13,27 @@ from datetime import datetime, timedelta
 # ==========================================
 st.set_page_config(page_title="威科夫波段-EvR分析", layout="wide")
 
-# 自動下載並設定中文字型 (解決 Linux 上中文變方塊的問題)
+# 自動下載並設定中文字型 (修正版：加入 User-Agent 防止被擋)
 @st.cache_resource
 def get_chinese_font():
+    # 使用 Google Noto Sans TC
+    font_url = "https://github.com/googlefonts/noto-cjk/raw/main/Sans/OTF/TraditionalChinese/NotoSansTC-Regular.otf"
     font_path = "NotoSansTC-Regular.otf"
+    
     if not os.path.exists(font_path):
         import urllib.request
-        url = "https://github.com/googlefonts/noto-cjk/raw/main/Sans/OTF/TraditionalChinese/NotoSansTC-Regular.otf"
-        with st.spinner("正在下載中文字型檔，請稍候..."):
+        # 修正2：加入 User-Agent Header，偽裝成瀏覽器下載，避免被 GitHub 阻擋
+        opener = urllib.request.build_opener()
+        opener.addheaders = [('User-agent', 'Mozilla/5.0')]
+        urllib.request.install_opener(opener)
+        
+        with st.spinner("正在下載中文字型檔 (約 16MB)，請稍候..."):
             try:
-                urllib.request.urlretrieve(url, font_path)
-            except:
-                st.error("字型下載失敗，圖表中文可能無法顯示。")
+                urllib.request.urlretrieve(font_url, font_path)
+            except Exception as e:
+                st.error(f"字型下載失敗：{e}，圖表中文將無法顯示。")
                 return None
+                
     return fm.FontProperties(fname=font_path)
 
 my_font = get_chinese_font()
@@ -225,7 +234,7 @@ def plot_chart(df, ticker, signals, mode_name, show_raw=False):
     
     # 日期格式化
     ax1.xaxis_date()
-    ax1.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+    ax1.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d')) # 現在這行可以正常運作了
     plt.xticks(rotation=45)
     plt.tight_layout()
     return fig
