@@ -10,18 +10,17 @@ import urllib.request
 from datetime import datetime, timedelta
 
 # ==========================================
-# 0. Streamlit 設定與字型處理 (修復版)
+# 0. Streamlit 設定與字型處理
 # ==========================================
 st.set_page_config(page_title="威科夫波段-EvR分析", layout="wide")
 
 @st.cache_resource
 def get_chinese_font():
-    # 改用 "粉圓體 (Open Huninn)"，連結穩定且支援繁體中文
+    # 使用 "粉圓體 (Open Huninn)"
     font_url = "https://github.com/justfont/open-huninn-font/releases/download/v2.0/jf-openhuninn-2.0.ttf"
     font_path = "jf-openhuninn-2.0.ttf"
     
     if not os.path.exists(font_path):
-        # 偽裝 User-Agent 防止 403 Forbidden
         opener = urllib.request.build_opener()
         opener.addheaders = [('User-agent', 'Mozilla/5.0')]
         urllib.request.install_opener(opener)
@@ -51,7 +50,6 @@ SYMBOL_MAP = {
 
 def calculate_indicators(df):
     df['SMA200'] = df['Close'].rolling(window=200).mean() # 年線
-    df['SMA60'] = df['Close'].rolling(window=60).mean()   # 季線
     df['Vol_MA20'] = df['Volume'].rolling(window=20).mean()
     
     # EvR 能量指標
@@ -62,12 +60,11 @@ def calculate_indicators(df):
     df['EvR'] = (evr_ema / evr_std) * 10
     return df
 
-# 新增：大盤環境判斷
+# 大盤環境判斷
 def get_market_sentiment():
     try:
         end = datetime.now()
         start = end - timedelta(days=400)
-        # 下載大盤 (台股代號 ^TWII)
         df = yf.download("^TWII", start=start, end=end, interval="1d", progress=False)
         
         if isinstance(df.columns, pd.MultiIndex): 
@@ -78,20 +75,17 @@ def get_market_sentiment():
         df = calculate_indicators(df)
         last = df.iloc[-1]
         
-        # 判斷邏輯
         close = last['Close'] if np.isscalar(last['Close']) else last['Close'].iloc[0]
         sma200 = last['SMA200'] if np.isscalar(last['SMA200']) else last['SMA200'].iloc[0]
         evr = last['EvR'] if np.isscalar(last['EvR']) else last['EvR'].iloc[0]
         
         trend = "多頭 (Bull)" if close > sma200 else "空頭 (Bear)"
-        trend_color = "red" if close > sma200 else "green" # 台股紅漲綠跌
         
         return {
             "price": close,
             "sma200": sma200,
             "evr": evr,
-            "trend": trend,
-            "color": trend_color
+            "trend": trend
         }
     except:
         return None
@@ -116,7 +110,7 @@ def analyze_classic_wyckoff(df):
         
         vol_cond = vol > (vol_ma * 1.5)
         
-        # 更新結構
+        # 1. 更新結構
         lowest_20 = df['Low'].iloc[i-20:i].min()
         if low_p < lowest_20 and vol_cond and close_p > low_p:
             struct_low = low_p; sc_date = date
@@ -130,7 +124,7 @@ def analyze_classic_wyckoff(df):
         df.at[date, 'Wyckoff_Support'] = struct_low
         df.at[date, 'Wyckoff_Resistance'] = struct_high
         
-        # 進出場
+        # 2. 進出場
         if position == 'None':
             if np.isnan(struct_low): continue
             is_after_sc = (sc_date is not None and date > sc_date)
@@ -208,12 +202,13 @@ def analyze_evr_trend(df, window=60):
 # 2. 繪圖模組
 # ==========================================
 
-def plot_chart(df, ticker, signals, mode_name, show_raw=False):
+def plot_chart(df, ticker, signals, mode_name):
     plt.close('all')
     subset = df.iloc[-250:].copy()
     
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 8), sharex=True, gridspec_kw={'height_ratios': [3, 1]})
     
+    # K線
     width = 0.6
     up = subset[subset.Close >= subset.Open]
     down = subset[subset.Close < subset.Open]
@@ -224,41 +219,39 @@ def plot_chart(df, ticker, signals, mode_name, show_raw=False):
     ax1.bar(down.index, down.High - down.Open, 0.1, bottom=down.Open, color='#26a69a')
     ax1.bar(down.index, down.Low - down.Close, 0.1, bottom=down.Close, color='#26a69a')
 
-    if not show_raw:
-        if 'Classic Wyckoff' in mode_name:
-            if 'Wyckoff_Support' in subset.columns:
-                ax1.plot(subset.index, subset['Wyckoff_Support'], color='purple', linewidth=1.5, label='支撐線 (SC)')
-            if 'Wyckoff_Resistance' in subset.columns:
-                ax1.plot(subset.index, subset['Wyckoff_Resistance'], color='orange', linewidth=1.5, linestyle='--', label='壓力線 (BC)')
-            ax2.bar(subset.index, subset['Volume'], color='gray', alpha=0.5)
-            ax2.set_ylabel('成交量', fontproperties=my_font)
-        else: 
-            ax1.plot(subset.index, subset['SMA200'], color='blue', linestyle='--', label='SMA200')
-            ax2.plot(subset.index, subset['EvR'], color='#7e57c2', label='EvR')
-            ax2.axhline(0, color='black')
-            ax2.set_ylabel('EvR 能量', fontproperties=my_font)
-
-        if not signals.empty:
-            mask = (signals['Date'] >= subset.index[0]) & (signals['Date'] <= subset.index[-1])
-            valid_signals = signals[mask]
-            for _, row in valid_signals.iterrows():
-                d = row['Date']; p = row['Price']; t = row['Type']
-                if t in ['Spring', 'Long', 'Test']:
-                    ax1.scatter(d, p*0.98, marker='^', color='purple', s=100, zorder=10)
-                    ax1.annotate(f"{row['Note']}", (d, p*0.97), xytext=(0,-20), textcoords='offset points', ha='center', color='purple', fontsize=9, fontproperties=my_font)
-                elif t in ['Short']:
-                    ax1.scatter(d, p*1.02, marker='v', color='blue', s=100, zorder=10)
-                    ax1.annotate(f"{row['Note']}", (d, p*1.03), xytext=(0,15), textcoords='offset points', ha='center', color='blue', fontsize=9, fontproperties=my_font)
-                elif 'Exit' in t:
-                    ax1.scatter(d, p, marker='x', color='black', s=80, zorder=15)
-    
-    else:
+    # 策略繪圖
+    if 'Classic Wyckoff' in mode_name:
+        if 'Wyckoff_Support' in subset.columns:
+            ax1.plot(subset.index, subset['Wyckoff_Support'], color='purple', linewidth=1.5, label='支撐線 (SC)')
+        if 'Wyckoff_Resistance' in subset.columns:
+            ax1.plot(subset.index, subset['Wyckoff_Resistance'], color='orange', linewidth=1.5, linestyle='--', label='壓力線 (BC)')
+        ax2.bar(subset.index, subset['Volume'], color='gray', alpha=0.5)
+        ax2.set_ylabel('成交量', fontproperties=my_font)
+    else: 
         ax1.plot(subset.index, subset['SMA200'], color='blue', linestyle='--', label='SMA200')
-        ax2.bar(subset.index, subset['Volume'], color='gray')
+        ax2.plot(subset.index, subset['EvR'], color='#7e57c2', label='EvR')
+        ax2.axhline(0, color='black')
+        ax2.set_ylabel('EvR 能量', fontproperties=my_font)
 
-    title = f"[{ticker}] {mode_name}" if not show_raw else f"[{ticker}] 原始走勢圖"
-    ax1.set_title(title, fontsize=16, fontproperties=my_font)
+    # 訊號標示
+    if not signals.empty:
+        mask = (signals['Date'] >= subset.index[0]) & (signals['Date'] <= subset.index[-1])
+        valid_signals = signals[mask]
+        for _, row in valid_signals.iterrows():
+            d = row['Date']; p = row['Price']; t = row['Type']
+            if t in ['Spring', 'Long', 'Test']:
+                ax1.scatter(d, p*0.98, marker='^', color='purple', s=100, zorder=10)
+                ax1.annotate(f"{row['Note']}", (d, p*0.97), xytext=(0,-20), textcoords='offset points', ha='center', color='purple', fontsize=9, fontproperties=my_font)
+            elif t in ['Short']:
+                ax1.scatter(d, p*1.02, marker='v', color='blue', s=100, zorder=10)
+                ax1.annotate(f"{row['Note']}", (d, p*1.03), xytext=(0,15), textcoords='offset points', ha='center', color='blue', fontsize=9, fontproperties=my_font)
+            elif 'Exit' in t:
+                ax1.scatter(d, p, marker='x', color='black', s=80, zorder=15)
+
+    ax1.set_title(f"[{ticker}] {mode_name}", fontsize=16, fontproperties=my_font)
     ax1.legend(loc='upper left', prop=my_font)
+    
+    # 日期軸設定
     ax1.xaxis_date()
     ax1.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
     plt.xticks(rotation=45)
@@ -299,7 +292,6 @@ def get_todays_action(df, signals):
 # 4. Streamlit 主程式介面
 # ==========================================
 
-# 側邊欄：大盤儀表板
 st.sidebar.title("📊 威科夫 x EvR 戰情室")
 
 with st.sidebar.expander("🌍 大盤環境 (^TWII)", expanded=True):
@@ -323,8 +315,10 @@ selected_name = st.sidebar.selectbox("選擇標的", list(symbol_name_map.values
 target_symbol = [k for k, v in symbol_name_map.items() if v == selected_name][0]
 
 manual_symbol = st.sidebar.text_input("或手動輸入代號 (如 2330.TW)", value="")
+# 🌟 修正點：如果有手動輸入，強制更新標題名稱
 if manual_symbol:
     target_symbol = manual_symbol.upper()
+    selected_name = target_symbol 
 
 st.sidebar.markdown("---")
 strategy = st.sidebar.radio("選擇策略", ["A. 威科夫波段 (區間)", "B. EvR 順勢 (趨勢)"])
@@ -336,7 +330,7 @@ if strategy.startswith("B"):
 run_btn = st.sidebar.button("🚀 開始分析", type="primary")
 
 if run_btn:
-    st.title(f"📈 {selected_name} ({target_symbol}) 分析報告")
+    st.title(f"📈 {selected_name} 分析報告") # 修正顯示格式
     
     with st.spinner(f"正在分析 {target_symbol}..."):
         try:
